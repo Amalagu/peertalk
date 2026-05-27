@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      `values-night` is selected by Android automatically in Dark Mode. It
+      avoids a bright flash before Flutter renders the application screen.
+    -->
+    <!-- Theme used while starting when the phone's Dark Mode setting is on. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <!-- The drawable is automatically replaced once Flutter paints UI. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <!-- Background behind Flutter after startup in the V2 Android embedding. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

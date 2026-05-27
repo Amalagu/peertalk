@@ -1,0 +1,32 @@
+# Pub is Dart/Flutter's package manifest. It defines SDK compatibility and the
+# external libraries whose APIs are imported from `lib/`.
+name: peer_talk
+description: Android-first offline local Wi-Fi push-to-talk voice MVP.
+# This is an application project, not a reusable package for pub.dev.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  # These bounds match the installed Flutter SDK's Dart version.
+  sdk: '>=3.5.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Native audio bridge: live PCM16 microphone capture and speaker streaming.
+  flutter_sound: ^9.28.0
+  # Reads Android Wi-Fi/IP/subnet/gateway details for local network display.
+  network_info_plus: ^6.1.4
+  # Shows Android runtime permission prompts for microphone and Wi-Fi metadata.
+  permission_handler: ^12.0.1
+  # Thin Dart wrapper over operating-system UDP sockets.
+  udp: ^5.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  # Bundles Flutter's standard Material icon font used throughout the UI.
+  uses-material-design: true

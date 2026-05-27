@@ -1,0 +1,75 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Android calls these "permissions". Declaring them tells Android what the
+      installed application may attempt to do; sensitive permissions such as
+      the microphone are additionally requested from the user at runtime.
+    -->
+
+    <!-- Required even for LAN-only sockets: Android names all IP socket access "INTERNET". -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Allows reading whether a network is present and reading Wi-Fi metadata. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Enables multicast/broadcast-related Wi-Fi operations used for discovery. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Lets the audio plugin adjust/use audio routes for live speaker playback. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Sensitive runtime permission: needed to capture speech while the button is held. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!--
+      Android versions before the newer nearby-device model treated access to
+      Wi-Fi SSID/BSSID information as location-related information.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+      Android 13+ permission for nearby Wi-Fi information. `neverForLocation`
+      declares that PeerTalk uses it to reach local peers, not infer location.
+    -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
+
+    <!-- Plain local IP traffic is permitted here; no HTTPS/cloud traffic is used. -->
+    <application
+        android:label="PeerTalk"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <!-- Flutter renders the UI inside one Android activity (application screen). -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Theme shown behind Flutter while the Dart UI starts. -->
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <!-- Makes MainActivity the icon-launched entry point. -->
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Tells plugins this app uses modern Flutter Android embedding APIs. -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+
+    <!-- Standard Flutter template declaration for Android text-processing integrations. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+</manifest>

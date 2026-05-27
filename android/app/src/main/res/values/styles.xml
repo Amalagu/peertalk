@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Native Android renders a Window before the Flutter/Dart engine has drawn
+      its first frame. These themes control only that brief native host period;
+      the visible PeerTalk dashboard theme is written in lib/main.dart.
+    -->
+    <!-- Theme used while starting when the phone's Dark Mode setting is off. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <!-- The drawable is automatically replaced once Flutter paints UI. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <!-- Background behind Flutter after startup in the V2 Android embedding. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

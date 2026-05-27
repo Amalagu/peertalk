@@ -1,0 +1,53 @@
+// This Gradle module turns Flutter/Dart code and Android plugins into an APK.
+plugins {
+    // Android application packaging/tasks such as `assembleDebug`.
+    id "com.android.application"
+    // Required because MainActivity and some plugin glue are Kotlin-aware.
+    id "kotlin-android"
+    // Connects this Android host project to Flutter's Dart build output/plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    // Java/Kotlin package namespace for generated Android resources/classes.
+    namespace = "com.peertalk.peer_talk"
+    // API level available while compiling. Plugin code uses APIs through 35.
+    compileSdk = 35
+    // Native Development Kit expected by native transitive plugin components.
+    ndkVersion = "25.1.8937393"
+
+    compileOptions {
+        // Modern Android Studio uses Java 17-compatible bytecode/tooling here.
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    defaultConfig {
+        // Permanent Android app identity used for install/update behavior.
+        applicationId = "com.peertalk.peer_talk"
+        // Oldest device supported; Flutter Sound requires Android API 24.
+        minSdk = 24
+        // Platform behavior/privacy rules this app has been tested against.
+        targetSdk = 35
+        // Values are read from pubspec/local Flutter build configuration.
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            // MVP convenience only: production Play Store releases require a
+            // private release signing key, never the debug signing identity.
+            signingConfig = signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    // Tells the Flutter Gradle plugin that pubspec/lib live two folders above.
+    source = "../.."
+}

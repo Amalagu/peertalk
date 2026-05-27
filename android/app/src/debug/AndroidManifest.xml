@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Allows local UDP sockets while running a debug Flutter build. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

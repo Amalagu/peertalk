@@ -1,0 +1,35 @@
+// Root Gradle settings: locates Flutter's build tooling and selects Android
+// plugin versions before the `app` module is evaluated.
+pluginManagement {
+    def flutterSdkPath = {
+        // Flutter writes its installed SDK path into local.properties so this
+        // Android project can build from Android Studio or the Flutter CLI.
+        def properties = new Properties()
+        file("local.properties").withInputStream { properties.load(it) }
+        def flutterSdkPath = properties.getProperty("flutter.sdk")
+        assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+        return flutterSdkPath
+    }()
+
+    // Imports Flutter's Gradle plugins directly from the installed Flutter SDK.
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+
+    repositories {
+        // Plugin implementation artifacts are found in these repositories.
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    // Registers Flutter plugins listed by Dart package dependencies.
+    id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+    // AGP understands Android manifests, SDK levels, resources, and APK output.
+    id "com.android.application" version "8.3.2" apply false
+    // Kotlin compiler plugin version used by the Android host.
+    id "org.jetbrains.kotlin.android" version "1.9.20" apply false
+}
+
+// Make the APK-producing `android/app` module part of this Gradle build.
+include ":app"

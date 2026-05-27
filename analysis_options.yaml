@@ -1,0 +1,8 @@
+# Lints teach safer Dart style during development and run in `flutter analyze`.
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # Debug information belongs in PeerTalk's on-screen log, not stray console
+    # prints which are hard to see while testing two physical phones.
+    avoid_print: true

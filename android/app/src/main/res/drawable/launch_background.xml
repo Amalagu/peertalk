@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Layer-list drawables combine native Android layers. This one simply paints a
+  white background before Flutter is ready; it is unrelated to UDP or audio.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+</layer-list>

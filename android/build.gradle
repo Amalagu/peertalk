@@ -1,0 +1,22 @@
+// Shared build settings applied to the app and every Android plugin module.
+allprojects {
+    repositories {
+        // Android/Flutter plugin artifacts commonly come from Google or Maven Central.
+        google()
+        mavenCentral()
+    }
+}
+
+// Place Gradle products beside Flutter build output at the project root.
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    // `flutter clean`/Gradle clean removes compiled output, never source files.
+    delete rootProject.buildDir
+}

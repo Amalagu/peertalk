@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Allows local UDP sockets while performance profiling this build. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>
