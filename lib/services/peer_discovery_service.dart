@@ -4,91 +4,93 @@ import 'dart:io';
 
 import 'package:udp/udp.dart';
 
+import '../models/communication_mode.dart';
 import '../models/network_snapshot.dart';
 import '../models/peer.dart';
 import 'app_constants.dart';
+import 'debug_log_service.dart';
 
-/// Finds PeerTalk instances without a central server.
+/// Announces this device and receives peer announcements over UDP broadcast.
 ///
-/// The central idea is UDP broadcast: a phone sends one short announcement to
-/// a LAN-wide address before it knows any peer IP. Every running instance that
-/// is listening on [discoveryPort] can hear that announcement, store the
-/// sender as a [Peer], and send a direct response. Some hotspot/router vendors
-/// suppress broadcast traffic, which is why the app also supports manual IP.
+/// Discovery is separate from call signaling. A visible peer is simply online
+/// enough to have recently advertised itself; pressing Call begins a session.
 class PeerDiscoveryService {
-  /// The bound UDP socket receives announcements and sends responses.
-  UDP? _socket;
+  PeerDiscoveryService({required DebugLogService logs}) : _logs = logs;
 
-  /// A Dart stream subscription converts incoming datagrams into callbacks.
+  final DebugLogService _logs;
+
+  /// UDP socket bound to the well-known discovery port on this phone.
+  ///
+  /// Binding means Android will deliver datagrams addressed to that port to
+  /// this app while it is open in the foreground.
+  UDP? _socket;
   StreamSubscription<Datagram?>? _subscription;
 
-  /// Periodic broadcasts allow phones that open the app later to be discovered.
+  /// Repeated announcements replace the need for a central directory server.
   Timer? _broadcastTimer;
-
   String? _deviceId;
   String? _deviceName;
   NetworkSnapshot? _network;
-  void Function(Peer peer)? _onPeerFound;
-  void Function(String message)? _onLog;
+  final Set<CommunicationMode> _supportedModes = const <CommunicationMode>{
+    CommunicationMode.pushToTalk,
+    CommunicationMode.fullDuplex,
+  };
 
-  /// Opens the discovery socket and begins advertising this phone.
+  /// Controller callback used after networking has converted JSON into a Peer.
+  void Function(Peer peer)? _onPeerFound;
+
+  /// Opens discovery listening and immediately announces this device.
   ///
-  /// A UDP socket is "connectionless": binding claims a local listening port,
-  /// but there is no call setup or permanent connection to another phone.
+  /// All devices bind the same UDP port because each is both discoverer and
+  /// discoverable. A phone may send a broadcast before another app instance is
+  /// listening, so periodic retransmission is essential.
   Future<void> start({
     required String deviceId,
     required String deviceName,
     required NetworkSnapshot network,
+    required int intervalSeconds,
     required void Function(Peer peer) onPeerFound,
-    void Function(String message)? onLog,
   }) async {
     await stop();
-
     _deviceId = deviceId;
     _deviceName = deviceName;
     _network = network;
     _onPeerFound = onPeerFound;
-    _onLog = onLog;
-
-    // `Endpoint.any` accepts packets addressed to any local network interface,
-    // useful when the current phone is either a hotspot client or hotspot host.
-    _socket = await UDP.bind(Endpoint.any(port: const Port(discoveryPort)));
-
-    // Operating systems normally protect applications from sending broadcast
-    // unless explicitly enabled on the socket.
-    _socket?.socket?.broadcastEnabled = true;
-    _subscription = _socket
-        ?.asStream()
-        .listen(_handleDatagram, onError: _handleListenError);
-
-    _onLog?.call('Discovery listening on UDP $discoveryPort');
-    await broadcastPresence();
-    _broadcastTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => unawaited(broadcastPresence()),
-    );
+    try {
+      _socket = await UDP.bind(Endpoint.any(port: const Port(discoveryPort)));
+      // UDP broadcasts are disabled by default on many socket APIs to prevent
+      // accidental LAN-wide traffic. Peer discovery explicitly opts into it.
+      _socket?.socket?.broadcastEnabled = true;
+      _subscription = _socket
+          ?.asStream()
+          .listen(_handleDatagram, onError: _handleListenError);
+      _logs.info('Discovery listening on UDP $discoveryPort');
+      await broadcastPresence();
+      _broadcastTimer = Timer.periodic(
+        Duration(seconds: intervalSeconds),
+        (_) => unawaited(broadcastPresence()),
+      );
+    } catch (error) {
+      _logs.error('Unable to bind discovery port $discoveryPort: $error');
+      rethrow;
+    }
   }
 
-  /// Sends a "hello" JSON message to everyone reachable on this local subnet.
-  ///
-  /// We try both the generic IPv4 broadcast and a subnet-derived directed
-  /// broadcast. Android hotspot implementations differ, so attempting both
-  /// improves discovery odds without changing the protocol.
+  /// Sends both the broad and subnet-derived form because hotspot firmware
+  /// varies in which broadcast address it forwards to attached devices.
   Future<void> broadcastPresence() async {
     final socket = _socket;
     if (socket == null || socket.closed) {
       return;
     }
-
-    final payload = utf8.encode(jsonEncode(_discoveryPayload(discoveryHello)));
+    final bytes = utf8.encode(jsonEncode(_payload(discoveryHello)));
     await _send(
-        socket, payload, Endpoint.broadcast(port: const Port(discoveryPort)));
-
+        socket, bytes, Endpoint.broadcast(port: const Port(discoveryPort)));
     final directedBroadcast = _network?.broadcastAddress;
     if (directedBroadcast != null && directedBroadcast != '255.255.255.255') {
       await _send(
         socket,
-        payload,
+        bytes,
         Endpoint.unicast(
           InternetAddress(directedBroadcast),
           port: const Port(discoveryPort),
@@ -97,8 +99,7 @@ class PeerDiscoveryService {
     }
   }
 
-  /// Closes timers, stream listeners, and the underlying operating system
-  /// socket so a later restart can bind to the same port cleanly.
+  /// Closes timers and socket ownership when discovery is restarted/disposed.
   Future<void> stop() async {
     _broadcastTimer?.cancel();
     _broadcastTimer = null;
@@ -108,114 +109,107 @@ class PeerDiscoveryService {
     _socket = null;
   }
 
-  /// Centralized send helper: UDP does not guarantee delivery, so a send log
-  /// only means bytes were handed to the network stack, not that a peer heard.
-  Future<void> _send(UDP socket, List<int> payload, Endpoint endpoint) async {
+  /// Sends one discovery JSON datagram and changes network errors into logs.
+  ///
+  /// Missing one presence broadcast is normal; the next periodic packet may
+  /// succeed after a brief Wi-Fi transition.
+  Future<void> _send(UDP socket, List<int> bytes, Endpoint endpoint) async {
     try {
-      final sent = await socket.send(payload, endpoint);
-      _onLog?.call('Discovery packet sent: $sent bytes to $endpoint');
+      await socket.send(bytes, endpoint);
     } catch (error) {
-      _onLog?.call('Discovery send failed: $error');
+      _logs.warning('Discovery send failed: $error');
     }
   }
 
-  /// Parses one incoming datagram into a usable discovered peer.
-  ///
-  /// Discovery uses UTF-8 JSON because these packets are rare and small;
-  /// readability is valuable here. Streaming audio uses binary instead because
-  /// it produces many packets per second and every byte affects latency.
+  /// Parses discovery traffic arriving from any phone on this broadcast LAN.
   void _handleDatagram(Datagram? datagram) {
     if (datagram == null) {
       return;
     }
-
-    Map<String, Object?> message;
     try {
-      message = jsonDecode(utf8.decode(datagram.data)) as Map<String, Object?>;
+      final message =
+          jsonDecode(utf8.decode(datagram.data)) as Map<String, Object?>;
+      if (message['app'] != appProtocolName ||
+          message['version'] != appProtocolVersion ||
+          message['deviceId'] == _deviceId) {
+        // Ignore unrelated applications/versions and our own broadcast looped
+        // back by Android. A phone should not appear as its own peer.
+        return;
+      }
+      final deviceId = message['deviceId'] as String?;
+      if (deviceId == null) {
+        return;
+      }
+      final modes = (message['supportedModes'] as List<Object?>? ??
+              const <Object?>['push_to_talk'])
+          .whereType<String>()
+          .map(CommunicationModeDisplay.fromWireName)
+          .toSet();
+      // Normally the sender's advertised Wi-Fi IP and the socket source IP are
+      // equal. Falling back to socket metadata keeps discovery usable on
+      // Android builds where local-network details are not exposed.
+      final advertisedIp = (message['ip'] as String?)?.trim();
+      final peer = Peer(
+        id: deviceId,
+        name: (message['name'] as String?)?.trim().isNotEmpty == true
+            ? (message['name'] as String).trim()
+            : 'Peer ${datagram.address.address}',
+        ipAddress: advertisedIp?.isNotEmpty == true
+            ? advertisedIp!
+            : datagram.address.address,
+        audioPort: _readPort(message['audioPort'], audioPort),
+        controlPort: _readPort(message['controlPort'], controlPort),
+        discoveryPort: _readPort(message['discoveryPort'], discoveryPort),
+        lastSeen: DateTime.now(),
+        supportedModes: modes,
+      );
+      _onPeerFound?.call(peer);
+      if (message['type'] == discoveryHello) {
+        // A direct reply speeds appearance in the sender's list. Periodic
+        // broadcast remains the long-term source of last-seen refreshes.
+        unawaited(_reply(datagram.address, peer.discoveryPort));
+      }
     } catch (_) {
-      return;
-    }
-
-    // A LAN may contain arbitrary UDP programs. Only accept messages that opt
-    // into PeerTalk's discovery protocol and the version this app understands.
-    if (message['app'] != appProtocolName ||
-        message['version'] != appProtocolVersion) {
-      return;
-    }
-
-    final remoteDeviceId = message['deviceId'] as String?;
-    // Phones receive their own broadcast on many networks; self-filtering keeps
-    // the local device from appearing as a selectable remote peer.
-    if (remoteDeviceId == null || remoteDeviceId == _deviceId) {
-      return;
-    }
-
-    // Prefer the advertised Wi-Fi IP for clarity, but the source address of a
-    // received datagram is an excellent fallback and often more authoritative.
-    final remoteIp = (message['ip'] as String?)?.trim();
-    final peer = Peer(
-      id: remoteDeviceId,
-      name: (message['name'] as String?)?.trim().isNotEmpty == true
-          ? (message['name'] as String).trim()
-          : 'Peer ${datagram.address.address}',
-      ip: remoteIp?.isNotEmpty == true ? remoteIp! : datagram.address.address,
-      audioPort: _readPort(message['audioPort'], audioPort),
-      discoveryPort: _readPort(message['discoveryPort'], discoveryPort),
-      lastSeen: DateTime.now(),
-    );
-
-    _onPeerFound?.call(peer);
-    _onLog?.call('Peer ${peer.name} seen at ${peer.endpoint}');
-
-    // A directed response means the announcing phone sees us immediately,
-    // rather than waiting until our next periodic broadcast.
-    if (message['type'] == discoveryHello) {
-      unawaited(_replyTo(datagram.address, peer.discoveryPort));
+      // Other UDP payloads on this LAN are not discovery packets.
     }
   }
 
-  /// Answers a discovery request directly at its observed source address.
-  Future<void> _replyTo(InternetAddress address, int port) async {
+  /// Answers one hello directly to the requesting address rather than all LAN
+  /// devices, since only that requester needs the immediate response.
+  Future<void> _reply(InternetAddress address, int port) async {
     final socket = _socket;
     if (socket == null || socket.closed) {
       return;
     }
-    final payload = utf8.encode(jsonEncode(_discoveryPayload(discoveryHere)));
     await _send(
       socket,
-      payload,
+      utf8.encode(jsonEncode(_payload(discoveryHere))),
       Endpoint.unicast(address, port: Port(port)),
     );
   }
 
-  /// Description sent over the LAN; no personal account or server token exists.
-  Map<String, Object?> _discoveryPayload(String type) {
-    return <String, Object?>{
-      'app': appProtocolName,
-      'version': appProtocolVersion,
-      'type': type,
-      'deviceId': _deviceId,
-      'name': _deviceName,
-      'ip': _network?.primaryIp,
-      'audioPort': audioPort,
-      'discoveryPort': discoveryPort,
-      'sentAt': DateTime.now().toUtc().toIso8601String(),
-    };
-  }
+  /// Creates the capability advertisement understood by another V2 phone.
+  ///
+  /// It contains addresses and features, not credentials or account data.
+  Map<String, Object?> _payload(String type) => <String, Object?>{
+        'app': appProtocolName,
+        'version': appProtocolVersion,
+        'type': type,
+        'deviceId': _deviceId,
+        'name': _deviceName,
+        'ip': _network?.primaryIp,
+        'audioPort': audioPort,
+        'controlPort': controlPort,
+        'discoveryPort': discoveryPort,
+        'supportedModes': _supportedModes.map((mode) => mode.wireName).toList(),
+        'sentAt': DateTime.now().toUtc().toIso8601String(),
+      };
 
-  /// Be tolerant of a future or manually-crafted JSON message containing a
-  /// numeric port as either JSON number or string.
-  int _readPort(Object? value, int fallback) {
-    if (value is int && value > 0) {
-      return value;
-    }
-    if (value is String) {
-      return int.tryParse(value) ?? fallback;
-    }
-    return fallback;
-  }
+  /// Tolerates JSON numbers or numeric text from future/other implementations.
+  int _readPort(Object? value, int fallback) =>
+      value is int ? value : int.tryParse('$value') ?? fallback;
 
   void _handleListenError(Object error) {
-    _onLog?.call('Discovery listener error: $error');
+    _logs.error('Discovery listener error: $error');
   }
 }

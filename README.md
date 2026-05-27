@@ -1,209 +1,305 @@
-# PeerTalk
+# PeerTalk V2
 
-Android-first Flutter MVP for offline local Wi-Fi push-to-talk voice.
+Android-first Flutter voice calling over a local Wi-Fi network or phone hotspot.
+PeerTalk has no accounts, cloud server, internet API, video, or WebRTC. Two
+phones communicate directly through UDP on the same LAN.
 
-PeerTalk is built for two Android phones on the same local network. One phone can host a hotspot and the other can join it, or both phones can join the same Wi-Fi router. The app does not use accounts, login, cloud servers, internet APIs, video, or WebRTC.
+## Version 2 capabilities
 
-## Read the code as a lesson
+- Periodic UDP peer announcements with device name, IP address, modes, and stale-peer removal.
+- Manual IP fallback when a router or hotspot blocks broadcast discovery.
+- Offline outgoing/incoming call flow with accept, reject, cancel, and end controls.
+- Unique session IDs so stale packets from ended calls are ignored.
+- Repeated call invitations with answer timeout.
+- Heartbeats during calls with reconnecting and peer-lost failure states.
+- Push-to-talk calls, preserving Version 1 behavior as the default mode.
+- Optional full-duplex calls where both microphones stream continuously.
+- Session-aware PCM audio packets with sequence numbers and timestamps.
+- Configurable jitter buffering and basic received packet-loss statistics.
+- Speakerphone control and Android communication audio mode during calls.
+- Persistent settings and a dedicated debug log screen.
 
-The source has intentionally detailed comments. A productive reading order is:
+Calls are intentionally **foreground-only** in Version 2. Keep PeerTalk visible
+on both phones during a call. A later version could add an Android foreground
+service and notification for background calling.
 
-1. Start with `lib/services/app_constants.dart` to see the protocol agreement: ports, audio settings, and audio packet bytes.
-2. Read `lib/models/network_snapshot.dart` and `lib/services/network_info_service.dart` to learn what IP address, subnet mask, gateway, and broadcast address mean.
-3. Read `lib/services/peer_discovery_service.dart` to follow UDP broadcast discovery.
-4. Read `lib/services/audio_capture_service.dart`, then `udp_audio_sender.dart`, `udp_audio_receiver.dart`, and `audio_playback_service.dart` to follow a spoken sound from microphone to the other speaker.
-5. Read `lib/services/call_controller.dart` to see how permissions, sockets, and push-to-talk state are coordinated.
-6. Finish with `lib/main.dart` and `android/app/src/main/AndroidManifest.xml` to connect Flutter interactions to Android capabilities.
+## Read the source in order
 
-Generated files such as `pubspec.lock`, `GeneratedPluginRegistrant.java`, wrapper scripts, APK build output, and icon binaries are deliberately not hand-commented: Flutter and Gradle regenerate or manage them.
+The code contains learning-oriented comments. A useful tour is:
 
-## Version 1 scope
+1. `lib/services/app_constants.dart`: UDP ports, timing defaults, and the binary audio header.
+2. `lib/models/communication_mode.dart`, `peer.dart`, and `call_session.dart`: the product's vocabulary.
+3. `lib/models/control_packet.dart` and `audio_packet.dart`: JSON signaling versus binary media.
+4. `lib/services/network_info_service.dart`, `peer_registry.dart`, and `peer_discovery_service.dart`: local addresses, announcements, and expiry.
+5. `lib/services/call_signaling_service.dart` and `call_controller.dart`: ringing, collision handling, timeouts, heartbeat, and reconnect behavior.
+6. `lib/services/audio_capture_service.dart`, `udp_audio_transport.dart`, and `audio_playback_service.dart`: microphone-to-speaker media path.
+7. `lib/services/audio_route_service.dart` and `android/app/src/main/kotlin/.../MainActivity.kt`: the small Android speaker/call-mode bridge.
+8. `lib/main.dart`: peer, settings, log, ringing, and active-call Flutter surfaces.
 
-- Push-to-talk half-duplex audio.
-- UDP broadcast peer discovery on the LAN.
-- Manual IP fallback when broadcast is filtered by a hotspot or router.
-- UDP PCM16 mono audio streaming.
-- Local IP, Wi-Fi, gateway, subnet, and broadcast display.
-- Connection state and debug logs for discovery/audio packets.
+Generated files such as `pubspec.lock`, Flutter plugin registration, Gradle
+wrapper scripts, launcher binaries, and APK output are not hand-annotated.
 
-## Flutter packages
-
-- `permission_handler` for microphone and Android Wi-Fi info permissions.
-- `network_info_plus` for current Wi-Fi/IP information.
-- `udp` for UDP discovery and audio sockets.
-- `flutter_sound` for PCM microphone capture and stream playback.
-
-This workspace targets Flutter 3.24.5 / Dart 3.5.x, so `network_info_plus` is constrained to the `6.x` line and `flutter_sound` is constrained to `9.28.x` instead of newer releases that require a newer Dart/Flutter Gradle stack.
-
-## Android permissions
-
-The Android manifest includes:
-
-- `RECORD_AUDIO`
-- `MODIFY_AUDIO_SETTINGS`
-- `INTERNET`
-- `ACCESS_NETWORK_STATE`
-- `ACCESS_WIFI_STATE`
-- `CHANGE_WIFI_MULTICAST_STATE`
-- `ACCESS_COARSE_LOCATION`
-- `ACCESS_FINE_LOCATION`
-- `NEARBY_WIFI_DEVICES`
-
-Android uses the `INTERNET` permission for local sockets too. PeerTalk still has no cloud or internet dependency.
-
-## Ports and audio format
-
-- Discovery UDP port: `45454`
-- Audio UDP port: `45455`
-- Audio: PCM16, mono, 16 kHz
-- Audio transport: small UDP packets with a 16-byte PeerTalk header
-- Playback: small jitter buffer before feeding Flutter Sound
-- Minimum Android SDK: 24
-- Android build stack: AGP 8.3.2, Gradle 8.5, Kotlin 1.9.20, NDK 25.1.8937393
-
-## How the communication works
-
-There is no server. Both phones run the same sequence:
+## Architecture
 
 ```text
-Open app
-  -> Android grants microphone/Wi-Fi metadata access
-  -> app binds UDP discovery port 45454 and audio port 45455
-  -> app broadcasts a small JSON "hello" on the local Wi-Fi LAN
-  -> another phone replies directly and becomes selectable
-  -> holding the talk button starts PCM microphone samples
-  -> samples are split into small binary UDP packets sent to selected IP
-  -> receiving phone validates packets, buffers briefly, and plays PCM bytes
+Home / Settings / Logs / Call screens
+                  |
+            CallController
+       ___________|____________________________
+      |           |             |              |
+PeerRegistry  CallSignaling  AudioTransport  AppSettings
+      |           |             |              |
+ Discovery UDP  Control UDP   Audio UDP     SharedPreferences
+                              /       \
+                       Mic capture   Jittered playback
+                                         |
+                             Android audio-route channel
 ```
 
-If broadcast announcements are filtered by a hotspot/router, manual IP skips only discovery. It still uses the same direct UDP audio transport.
+Important services:
 
-### Local IP and subnet example
+| Service | Responsibility |
+| --- | --- |
+| `PeerDiscoveryService` | Broadcast/receive LAN presence messages on UDP `45454` |
+| `PeerRegistry` | Store peers, last-seen time, and remove stale discovered peers |
+| `CallSignalingService` | Send/receive invite, answer, end, and heartbeat messages on UDP `45456` |
+| `CallController` | Own call state transitions and coordinate media/UI |
+| `UdpAudioTransport` | Send/receive session-tagged binary audio on UDP `45455` |
+| `AudioCaptureService` | Stream PCM16 microphone samples using Flutter Sound |
+| `AudioPlaybackService` | Reorder briefly, drop late packets, and play audio |
+| `AudioRouteService` | Request Android communication mode and speakerphone routing |
+| `AppSettingsService` | Persist device name, audio mode, tuning, and logs preference |
+| `DebugLogService` | Keep bounded diagnostic events for device testing |
 
-Suppose Phone A hosts a hotspot and reports `192.168.43.1` with subnet mask `255.255.255.0`. Phone B may receive `192.168.43.152`. The `192.168.43` portion identifies their local subnet; the final number identifies each phone. A calculated broadcast address of `192.168.43.255` addresses devices on that subnet.
+### Flutter layout lesson from the call and log screens
 
-Internet access is not part of this path. The hotspot acts as a local Wi-Fi access point/router even when it has no upstream data connection.
+Flutter lays out a widget by passing it constraints from its parent, rather
+than by letting each child assume it owns the physical screen. The Logs tab is
+already inside a `Scaffold`, app bar, safe area, navigation bar, card padding,
+and title row. Its black terminal area therefore uses `Expanded` to consume the
+remaining height given by that real parent chain. Calculating its height from
+the entire phone screen would allocate space that the surrounding UI already
+uses and create the familiar yellow/black overflow warning.
 
-### Why UDP instead of TCP
+The ringing and ended call surfaces use a full available layout region plus a
+centered, maximum-width content column. This keeps the call identity and
+controls in the visual center on phones, landscape rotation, and wider Android
+screens instead of stretching the content toward one side.
 
-TCP provides reliable ordered delivery by retransmitting missing data. For files, that is excellent. For live voice, waiting to resend a stale sound can increase delay behind the speaker's current words. UDP sends datagrams immediately without delivery or order guarantees, which minimizes latency at the cost of occasional missing or late audio.
+## LAN discovery
 
-This MVP accepts that tradeoff and leaves packet-loss concealment and reordering as later improvements.
+Each app periodically broadcasts a small JSON announcement:
 
-### Why raw PCM audio
+```json
+{
+  "app": "PeerTalk",
+  "version": 2,
+  "type": "hello",
+  "deviceId": "temporary-session-device-id",
+  "name": "Kitchen phone",
+  "ip": "192.168.43.152",
+  "audioPort": 45455,
+  "controlPort": 45456,
+  "discoveryPort": 45454,
+  "supportedModes": ["push_to_talk", "full_duplex"]
+}
+```
 
-PCM16 mono at 16 kHz is straightforward: the microphone emits 16-bit sound samples and the receiving speaker plays the same kind of samples. It avoids encoder/decoder complexity while validating the network design. Its approximate payload bandwidth is:
+A peer remains visible while announcements refresh its `lastSeen` value.
+Automatically discovered peers disappear after approximately three discovery
+intervals without an update. A manually entered peer remains listed because
+there was no announcement stream to judge.
+
+Example hotspot LAN:
 
 ```text
-16,000 samples/second x 2 bytes/sample x 1 channel = 32,000 bytes/second
+Phone A hotspot: 192.168.43.1
+Phone B client:  192.168.43.152
+Subnet mask:     255.255.255.0
+Broadcast:       192.168.43.255
 ```
 
-A future Opus voice codec would use less bandwidth and handle network problems better, but adds compression and codec lifecycle concerns.
+The phones communicate inside that local subnet even if the hotspot has no
+internet connection.
 
-### Audio packet structure
+## Call signaling
 
-Each binary UDP audio packet contains a 16-byte header followed by up to 960 PCM bytes:
+Call control messages are JSON UDP datagrams. Every message includes a unique
+`sessionId`, sender details, timestamp, and call metadata.
+
+| Packet | Purpose |
+| --- | --- |
+| `CALL_INVITE` | Start ringing the remote phone and propose mode/sample rate |
+| `CALL_ACCEPT` | Confirm that media for this session may begin |
+| `CALL_REJECT` | Decline an invite or report busy |
+| `CALL_END` | End the current matched session |
+| `HEARTBEAT` | Prove an accepted call still reaches the peer |
+| `HEARTBEAT_ACK` | Confirm the heartbeat arrived |
+
+UDP does not guarantee delivery. Outgoing invites are repeated until accepted,
+rejected, cancelled, or timed out. Connected calls send heartbeat traffic every
+two seconds; a temporary gap displays `Connecting`, and a longer gap fails the
+call with a clear message.
+
+If both devices call at almost the same instant, both use a deterministic
+device-ID comparison: one outbound session wins and the other device changes
+to the incoming-call flow instead of leaving both phones permanently busy.
+
+## Audio pipeline
+
+PeerTalk uses PCM16 mono audio rather than compression in this prototype:
+
+```text
+16,000 samples/sec x 2 bytes/sample x 1 channel = 32,000 bytes/sec
+```
+
+The Settings screen also permits `8 kHz` and `24 kHz`; the caller proposes the
+selected rate inside the invitation, and both ends play/capture that rate for
+the accepted session.
+
+Each V2 UDP audio datagram includes session identity:
 
 | Bytes | Field | Purpose |
 | --- | --- | --- |
-| `0..3` | `PTAU` | Identifies a PeerTalk audio packet |
-| `4` | Protocol version | Prevents misreading an incompatible future layout |
-| `5` | Flags/reserved | Available for future optional behavior |
-| `6..7` | Payload length | Number of PCM bytes after the header |
-| `8..11` | Sequence number | Enables later loss/order detection |
-| `12..15` | Timestamp portion | Enables later timing/jitter analysis |
-| `16..` | PCM payload | Actual speaker audio sample bytes |
+| `0..3` | `PTA2` | Identifies a PeerTalk V2 audio datagram |
+| `4` | Version | Reject incompatible formats |
+| `5` | Packet type | `1` represents audio |
+| `6..7` | Metadata length | Size of following UTF-8 JSON identity block |
+| `8..9` | Payload length | Size of PCM samples in this datagram |
+| `10..13` | Sequence number | Detect gaps and late/out-of-order packets |
+| `14..21` | Timestamp | Sender capture/send time in milliseconds |
+| `22..` | Metadata + PCM | `sessionId`, `senderId`, then sound bytes |
 
-Smaller packets avoid network fragmentation and reduce latency. The receive side currently buffers packets for about 60 ms before playback to smooth irregular Wi-Fi delivery timing.
+Audio is sent only to the selected/answered peer IP, never broadcast. Received
+audio must match the active session and remote sender. A sequence-keyed jitter
+buffer waits a configurable short period before speaker playback; already
+obsolete packets are dropped and shown in quality statistics.
 
-## Setup
+### Push-to-talk and full-duplex
+
+- **Push-to-talk** opens microphone capture only while the button is held and
+  ignores incoming audio while transmitting. This is the robust fallback.
+- **Full-duplex** begins continuous microphone streaming after acceptance and
+  plays incoming audio concurrently.
+
+For full-duplex calls, the app asks Android for `MODE_IN_COMMUNICATION`, uses
+Flutter Sound's `voice_communication` recording source, and routes to
+speakerphone by default. Echo cancellation remains device-dependent; headphones
+or lower speaker volume may still be needed on some phones.
+
+## Packages and Android configuration
+
+- `permission_handler`: runtime microphone and Wi-Fi metadata permission prompts.
+- `network_info_plus`: local Wi-Fi IP, subnet, gateway, and broadcast values.
+- `udp`: Dart UDP sockets for discovery, signaling, and media.
+- `flutter_sound`: live PCM16 recording and stream playback.
+- `shared_preferences`: persistent user settings.
+
+Android permissions in `AndroidManifest.xml` include `RECORD_AUDIO`,
+`MODIFY_AUDIO_SETTINGS`, `INTERNET`, network/Wi-Fi state, multicast-state, and
+location/nearby-Wi-Fi permissions. Android calls local-IP socket permission
+`INTERNET`; PeerTalk still sends no cloud traffic.
+
+- Minimum Android SDK: 24
+- Compile/target SDK: 35
+- Android build stack: AGP 8.3.2, Gradle 8.5, Kotlin 1.9.20, NDK 25.1.8937393
+
+## Build and install
 
 ```powershell
 flutter pub get
-flutter run
-```
-
-For a debug APK:
-
-```powershell
+flutter analyze
+flutter test
 flutter build apk --debug
 ```
 
-## Test with two Android phones
-
-1. Install the app on both phones.
-2. Turn on hotspot on Phone A.
-3. Connect Phone B to Phone A's hotspot.
-4. Open PeerTalk on both phones.
-5. Accept microphone and Wi-Fi/network info permissions.
-6. Confirm each phone shows a local IP address.
-7. Wait for UDP discovery to show the other phone in the peer list.
-8. If no peer appears, enter the other phone's local IP in `Manual IP` and tap `Connect`.
-9. Select the peer.
-10. Press and hold `HOLD TO TALK` on one phone and speak.
-11. Release the button before the other phone talks back.
-
-The same flow works when both phones are connected to the same Wi-Fi router.
-
-## Troubleshooting
-
-- If discovery does not find peers, use manual IP. Some Android hotspots and routers filter broadcast packets.
-- If Wi-Fi name or subnet fields are blank, re-open Android settings and ensure precise location/Wi-Fi permission is allowed for the app.
-- If audio is choppy, keep phones close, test on a less congested Wi-Fi channel, and avoid both users talking at once.
-- If the receiving phone shows packet logs but no sound, check media volume and Bluetooth routing.
-- If one phone cannot receive packets, verify both devices are on the same subnet and that no VPN/firewall app is active.
-
-## Project layout
+The generated APK is:
 
 ```text
-lib/
-  main.dart
-  models/
-    debug_log_entry.dart
-    network_snapshot.dart
-    peer.dart
-  services/
-    audio_capture_service.dart
-    audio_playback_service.dart
-    call_controller.dart
-    network_info_service.dart
-    peer_discovery_service.dart
-    udp_audio_receiver.dart
-    udp_audio_sender.dart
+build/app/outputs/flutter-apk/app-debug.apk
 ```
 
-## Background topics to read next
+`test/protocol_models_test.dart` validates V2 audio/control packet round trips,
+malformed audio rejection, and packet-loss gap counting.
 
-Read these in roughly this order:
+## Test on two phones
 
-1. **Local-area networks and private IPv4 addresses**: understand why `192.168.x.x`/`10.x.x.x` addresses work without internet.
-2. **Subnet masks and broadcast addresses**: learn how one device announces itself before it knows a peer IP.
-3. **UDP sockets, ports, datagrams, broadcast, and unicast**: these are the networking foundation of discovery and live audio in this app.
-4. **TCP versus UDP for real-time media**: understand reliability versus latency tradeoffs.
-5. **Digital audio fundamentals**: PCM, sample rate, bit depth, channels, buffering, and why raw audio consumes bandwidth.
-6. **Jitter, packet loss, latency, and jitter buffers**: these explain why live network audio may sound uneven and how players compensate.
-7. **Binary protocol design**: magic bytes, headers, payload lengths, sequence numbers, endianness, and validating untrusted packet data.
-8. **Android runtime permissions and Wi-Fi privacy behavior**: microphone access and why Wi-Fi identifiers require user permission.
-9. **Flutter plugins and platform channels**: how Dart code reaches Android's microphone, speaker, and network APIs without custom Kotlin in this MVP.
-10. **Gradle and Android SDK levels**: why plugins dictate `minSdk`, `compileSdk`, NDK, and Java/Kotlin build settings.
-11. **Audio codecs such as Opus**: the natural next step after a PCM prototype works.
-12. **Full-duplex voice engineering**: acoustic echo cancellation, noise suppression, audio focus, and simultaneous send/receive challenges.
+### Phone hotspot scenario
 
-Useful starting documentation:
+1. Install the same APK on both Android phones.
+2. Enable hotspot on Phone A.
+3. Connect Phone B to Phone A's hotspot.
+4. Open PeerTalk on both phones and grant requested permissions.
+5. Confirm both phones show local IP addresses in the Network panel.
+6. Confirm each phone appears under Available peers with `Online` status.
+7. Tap a peer row to view its advertised IP, ports, and modes.
+8. Tap the call icon on Phone A.
+9. Confirm Phone B shows an incoming call screen.
+10. Accept on Phone B and confirm both phones show `Connected`.
+11. End the call and confirm both return to an ended/idle state.
+
+### Same-router Wi-Fi scenario
+
+1. Connect both phones to one Wi-Fi router.
+2. Open PeerTalk and repeat peer discovery and call tests above.
+3. Verify calls remain local by disabling internet upstream if convenient; the
+   Wi-Fi LAN connection itself must remain enabled.
+
+### Manual IP fallback
+
+1. Note Phone B's IP in its Network panel.
+2. On Phone A, enter that IP under Manual peer and add it.
+3. Tap Call on the manual peer.
+4. Confirm Phone B receives and can accept the call even if discovery was not visible.
+
+### Required behavior checks
+
+| Test | Expected result |
+| --- | --- |
+| Reject call | Caller shows a failed/declined result; no audio session starts |
+| Cancel outgoing call | Receiver stops ringing or times out without media |
+| End connected call | Other phone exits the matched session cleanly |
+| Push-to-talk mode | Audio sends only while holding the talk control |
+| Full-duplex mode | Both devices can speak and receive after acceptance |
+| Mute | Full-duplex microphone stops sending until unmuted |
+| Speaker toggle | Android call audio switches speaker routing |
+| Packet loss indicator | Received sequence gaps update the displayed percentage |
+| Disconnect Wi-Fi during call | Status changes toward reconnecting, then fails if peer remains absent |
+| Rejoin quickly | Heartbeats can return a connecting call to connected before failure timeout |
+| Stale peer removal | Close one idle app; its automatically discovered row disappears after timeout |
+| Logs disabled | New routine events stop being collected; errors may still be shown |
+
+## Current limitations
+
+- Calls remain active only while the application is in the foreground.
+- Raw PCM requires more bandwidth than a voice codec such as Opus.
+- Packet-loss reporting is basic and does not conceal missing speech.
+- Audio jitter buffering orders recently received packets but does not implement
+  sophisticated adaptive delay.
+- Echo reduction depends on the Android device's communication audio support.
+
+## Topics to study next
+
+1. Private IPv4 networks, hotspots, subnet masks, broadcast and unicast.
+2. UDP sockets, datagrams, port binding, packet loss, and NAT-free LAN traffic.
+3. Distributed session state, retries, timeouts, heartbeats, and idempotency.
+4. Simultaneous-call collision resolution and deterministic conflict handling.
+5. PCM audio, sampling rates, byte depth, audio routes, and Android audio focus.
+6. Real-time media latency, jitter buffers, sequence numbers, and loss concealment.
+7. Binary network protocols, metadata framing, validation, and endianness.
+8. Android permissions, Wi-Fi privacy policies, foreground services, and notifications.
+9. Flutter plugins/platform channels and native Kotlin interoperation.
+10. Opus codec integration, echo cancellation, noise suppression, and production VoIP.
+
+Starting references:
 
 - Dart UDP sockets: <https://api.dart.dev/dart-io/RawDatagramSocket-class.html>
-- Android permissions overview: <https://developer.android.com/guide/topics/permissions/overview>
-- Android nearby Wi-Fi permissions: <https://developer.android.com/develop/connectivity/wifi/wifi-permissions>
-- Flutter platform integration: <https://docs.flutter.dev/platform-integration/platform-channels>
-- Flutter Sound package: <https://pub.dev/packages/flutter_sound>
-- `network_info_plus` package: <https://pub.dev/packages/network_info_plus>
-- `permission_handler` package: <https://pub.dev/packages/permission_handler>
-- `udp` package: <https://pub.dev/packages/udp>
-
-## Next version ideas
-
-- Adaptive packet loss concealment.
-- Opus codec support for lower bandwidth.
-- Better Android audio focus and route controls.
-- Persistent device names.
-- Full-duplex calling only after UDP PCM stability is proven.
+- Android permissions: <https://developer.android.com/guide/topics/permissions/overview>
+- Android Wi-Fi permissions: <https://developer.android.com/develop/connectivity/wifi/wifi-permissions>
+- Android audio input: <https://developer.android.com/reference/android/media/MediaRecorder.AudioSource>
+- Flutter platform channels: <https://docs.flutter.dev/platform-integration/platform-channels>
+- Flutter Sound: <https://pub.dev/packages/flutter_sound>
+- `network_info_plus`: <https://pub.dev/packages/network_info_plus>
+- `permission_handler`: <https://pub.dev/packages/permission_handler>
+- `shared_preferences`: <https://pub.dev/packages/shared_preferences>
+- `udp`: <https://pub.dev/packages/udp>

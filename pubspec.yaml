@@ -4,7 +4,7 @@ name: peer_talk
 description: Android-first offline local Wi-Fi push-to-talk voice MVP.
 # This is an application project, not a reusable package for pub.dev.
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   # These bounds match the installed Flutter SDK's Dart version.
@@ -21,6 +21,8 @@ dependencies:
   permission_handler: ^12.0.1
   # Thin Dart wrapper over operating-system UDP sockets.
   udp: ^5.0.3
+  # Stores user-selected call mode, device name, and tuning preferences.
+  shared_preferences: ^2.3.3
 
 dev_dependencies:
   flutter_test:

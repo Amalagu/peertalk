@@ -40,6 +40,8 @@ class AudioCaptureService {
   /// higher bandwidth than a voice codec, an acceptable MVP tradeoff on Wi-Fi.
   Future<void> start({
     required void Function(Uint8List pcm) onData,
+    required int sampleRate,
+    required bool voiceCommunicationMode,
     void Function(String message)? onLog,
   }) async {
     if (_isRecording) {
@@ -48,7 +50,7 @@ class AudioCaptureService {
     await open();
 
     // This controller is a Dart pipe between native microphone output and the
-    // caller's `onData`, which eventually reaches UdpAudioSender.
+    // caller's `onData`, which eventually reaches UdpAudioTransport.
     _streamController = StreamController<Uint8List>();
     _streamSubscription = _streamController!.stream.listen(
       onData,
@@ -60,9 +62,14 @@ class AudioCaptureService {
       // values would be interpreted at the wrong speed/channel arrangement.
       codec: Codec.pcm16,
       numChannels: audioChannels,
-      sampleRate: audioSampleRate,
+      sampleRate: sampleRate,
       bufferSize: audioRecorderBufferSize,
       toStream: _streamController!.sink,
+      // Android's VOICE_COMMUNICATION source gives capable devices an
+      // opportunity to engage echo/noise processing for full-duplex calls.
+      audioSource: voiceCommunicationMode
+          ? AudioSource.voice_communication
+          : AudioSource.microphone,
     );
     _isRecording = true;
     onLog?.call('Microphone capture started');

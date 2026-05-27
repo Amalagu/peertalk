@@ -1,71 +1,98 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:typed_data';
 
 import 'package:flutter_sound/flutter_sound.dart';
 
+import '../models/audio_packet.dart';
 import 'app_constants.dart';
+import 'debug_log_service.dart';
 
-/// Turns received PCM byte packets back into audible speaker output.
+/// Reorders and delays received voice packets slightly before speaker output.
 ///
-/// Network delivery timing is uneven: two UDP packets might arrive together or
-/// a packet might be a few milliseconds late. A tiny queue here is a "jitter
-/// buffer": it trades a small startup delay for smoother playback.
+/// UDP can deliver packets in uneven bursts. The sequence-keyed buffer waits a
+/// configurable number of milliseconds, then feeds packets to Flutter Sound in
+/// ascending order. Packets arriving after already-played audio are dropped.
 class AudioPlaybackService {
-  /// Native audio-output plugin endpoint.
+  AudioPlaybackService({required DebugLogService logs}) : _logs = logs;
+
+  final DebugLogService _logs;
+
+  /// Plugin wrapper around Android's output audio track.
   final FlutterSoundPlayer _player = FlutterSoundPlayer();
 
-  /// FIFO means first packet queued is the first packet fed to the speaker.
-  final Queue<Uint8List> _jitterBuffer = Queue<Uint8List>();
-
-  /// Holds the first packet briefly so a small group can drain smoothly.
+  /// Sorted maps expose the smallest sequence number first even if packet 12
+  /// arrives before packet 11. A normal insertion-order map cannot do this.
+  final SplayTreeMap<int, _BufferedAudio> _buffer =
+      SplayTreeMap<int, _BufferedAudio>();
   Timer? _drainTimer;
   bool _isOpen = false;
   bool _isPlaying = false;
+  int? _sampleRate;
+  int? _lastPlayedSequence;
+  int jitterBufferMs = defaultJitterBufferMs;
+  void Function()? onDroppedLate;
 
-  /// Prepares a live player stream at the same format used for capture.
+  /// Opens a raw PCM streaming speaker configured exactly like the transmitter.
   ///
-  /// `interleaved` is relevant when PCM has multiple channels; mono still sets
-  /// it explicitly so the data layout agreement is visible in code.
-  Future<void> open({void Function(String message)? onLog}) async {
-    if (_isPlaying) {
+  /// If sample rate/channel/codec differed from recording, byte values would
+  /// play at the wrong speed or would not represent the intended waveform.
+  Future<void> open({required int sampleRate}) async {
+    if (_isPlaying && _sampleRate == sampleRate) {
       return;
     }
-    if (!_isOpen) {
-      await _player.openPlayer();
-      _isOpen = true;
-    }
-
+    await close();
+    await _player.openPlayer();
+    _isOpen = true;
     await _player.startPlayerFromStream(
       codec: Codec.pcm16,
       interleaved: true,
       numChannels: audioChannels,
-      sampleRate: audioSampleRate,
+      sampleRate: sampleRate,
       bufferSize: audioRecorderBufferSize,
     );
+    _sampleRate = sampleRate;
     _isPlaying = true;
-    onLog?.call('Speaker playback stream ready');
+    _logs.info('Speaker playback ready at $sampleRate Hz');
   }
 
-  /// Adds valid received audio to the short smoothing queue.
-  void enqueue(Uint8List pcm) {
-    if (!_isPlaying || pcm.isEmpty) {
+  /// Applies current-call buffering settings and a quality-stat callback.
+  void configure({
+    required int jitterMilliseconds,
+    required void Function() whenDroppedLate,
+  }) {
+    jitterBufferMs = jitterMilliseconds;
+    onDroppedLate = whenDroppedLate;
+  }
+
+  /// Adds an arriving packet for ordered future playout.
+  ///
+  /// The jitter buffer intentionally waits a small time before playback,
+  /// allowing slightly late earlier packets to arrive and be sorted correctly.
+  void enqueue(AudioPacket packet) {
+    if (!_isPlaying || packet.payload.isEmpty) {
       return;
     }
-
-    _jitterBuffer.add(pcm);
-
-    // Only the first recently-arrived packet creates a timer; packets arriving
-    // during the wait join the same batch rather than extending latency.
-    _drainTimer ??= Timer(const Duration(milliseconds: 60), _drain);
+    final lastPlayed = _lastPlayedSequence;
+    if (lastPlayed != null && packet.sequenceNumber <= lastPlayed) {
+      // Sound that belongs before bytes already sent to the speaker cannot be
+      // inserted retroactively; playing it now would scramble spoken words.
+      onDroppedLate?.call();
+      return;
+    }
+    _buffer[packet.sequenceNumber] =
+        _BufferedAudio(packet: packet, arrivedAt: DateTime.now());
+    _drainTimer ??= Timer.periodic(
+      const Duration(milliseconds: 10),
+      _drainReady,
+    );
   }
 
-  /// Stops output and discards any queued speech on application shutdown.
-  Future<void> close() async {
+  /// Clears queued audio and releases the native speaker stream at call end.
+  Future<void> stopStream() async {
     _drainTimer?.cancel();
     _drainTimer = null;
-    _jitterBuffer.clear();
-
+    _buffer.clear();
+    _lastPlayedSequence = null;
     if (_isPlaying) {
       await _player.stopPlayer();
       _isPlaying = false;
@@ -74,16 +101,51 @@ class AudioPlaybackService {
       await _player.closePlayer();
       _isOpen = false;
     }
+    _sampleRate = null;
   }
 
-  /// Feeds queued PCM in arrival order to Flutter Sound's live byte sink.
+  Future<void> close() => stopStream();
+
+  /// Periodically emits every packet that has waited the configured delay.
   ///
-  /// Version 1 does not reorder using packet sequence numbers; the queue only
-  /// smooths timing. Reordering/loss concealment is a sensible later feature.
-  void _drain() {
-    _drainTimer = null;
-    while (_jitterBuffer.isNotEmpty) {
-      _player.uint8ListSink?.add(_jitterBuffer.removeFirst());
+  /// Waiting forever for a missing sequence would freeze the conversation.
+  /// Once ready packets have waited enough, they are played in available order.
+  void _drainReady(Timer timer) {
+    if (_buffer.isEmpty) {
+      timer.cancel();
+      _drainTimer = null;
+      return;
+    }
+    final now = DateTime.now();
+    while (_buffer.isNotEmpty) {
+      final sequence = _buffer.firstKey()!;
+      final candidate = _buffer[sequence]!;
+      if (now.difference(candidate.arrivedAt).inMilliseconds < jitterBufferMs) {
+        break;
+      }
+      _buffer.remove(sequence);
+      final staleThreshold = jitterBufferMs * 6 + 300;
+      if (now.difference(candidate.arrivedAt).inMilliseconds > staleThreshold) {
+        // Very old sound increases conversational lag more than it helps
+        // intelligibility, so it is discarded and reflected in diagnostics.
+        onDroppedLate?.call();
+        continue;
+      }
+      _player.uint8ListSink?.add(candidate.packet.payload);
+      _lastPlayedSequence = sequence;
     }
   }
+}
+
+class _BufferedAudio {
+  const _BufferedAudio({
+    required this.packet,
+    required this.arrivedAt,
+  });
+
+  /// Protocol packet containing its ordering sequence and PCM samples.
+  final AudioPacket packet;
+
+  /// Local clock value used to determine when its jitter wait has elapsed.
+  final DateTime arrivedAt;
 }
